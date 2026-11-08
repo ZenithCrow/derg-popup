@@ -25,11 +25,10 @@ jobs:
       - name: Build for Windows
         run: |
           zig build -Drelease-windows
-          ls
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            zig-out/derg-clock-popup-x86_64-windows.zip
+            zig-out/derg-popup-x86_64-windows.zip
 

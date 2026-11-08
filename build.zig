@@ -1,14 +1,25 @@
 const std = @import("std");
 
-const Translator = @import("translate_c").Translator;
-
 const release_win_sdls_include_path = "win_deps/include";
 const release_win_sdls_lib_path = "win_deps";
 const release_linux_sdls_include_path = "/usr/include";
 const release_linux_sdls_lib_path = "/usr/lib";
 const max_num_targets = 10;
 
-const exe_name = "derg-clock-popup";
+const PopupVariant = enum(u32) {
+    clock = 0,
+    battery = 1,
+};
+
+const PopupVariantExe = struct {
+    name: []const u8,
+    sub_path: []const u8,
+};
+const exes = &[_]PopupVariantExe{
+    .{ .name = "derg-clock-popup", .sub_path = "src/main_clock.zig" },
+    .{ .name = "derg-battery-popup", .sub_path = "src/main_battery.zig" },
+};
+const common_mame = "derg-popup";
 
 pub fn build(b: *std.Build) !void {
     var release_targets: [max_num_targets]std.Build.ResolvedTarget = undefined;
@@ -37,113 +48,145 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
+    const popup_variant = b.option(PopupVariant, "popup-variant", "Select a popup variant to build. If not specified, all of them will be built.");
+    const variants: []const PopupVariantExe = if (popup_variant) |v| &.{exes[@backingInt(v)]} else exes;
+
     var sdls_include_path = b.option([]const u8, "sdls_include_path", "Path to directory containing SDL3, SDL3_ttf and SDL3_image include directories");
     var sdls_lib_path = b.option([]const u8, "sdls_lib_path", "Path to directory containing SDL3, SDL3_ttf and SDL3_image libraries");
 
     const targets = if (release) release_targets[0..targ_idx] else &[_]std.Build.ResolvedTarget{b.standardTargetOptions(.{})};
     const optimize: std.lang.Optimize = if (release) .safe else b.standardOptimizeOption(.{});
 
+    const test_step = b.step("test", "Run tests");
+
     for (targets) |target| {
-        var target_path: []const u8 = if (target.result.os.tag == .windows) exe_name else "";
+        var target_path: []const u8 = if (target.result.os.tag == .windows) common_mame else "";
 
         const target_triple = try target.query.zigTriple(b.allocator);
-        const name_target_triple = try std.mem.join(b.allocator, "-", &.{ exe_name, target_triple });
+        const name_target_triple = try std.mem.join(b.allocator, "-", &.{ common_mame, target_triple });
+
+        switch (target.result.os.tag) {
+            .linux => {
+                sdls_include_path = release_linux_sdls_include_path;
+                sdls_lib_path = release_linux_sdls_lib_path;
+            },
+            .windows => {
+                sdls_include_path = release_win_sdls_include_path;
+                sdls_lib_path = b.pathJoin(&.{ release_win_sdls_lib_path, @tagName(target.result.cpu.arch) });
+            },
+            else => {},
+        }
 
         if (release) {
-            switch (target.result.os.tag) {
-                .linux => {
-                    sdls_include_path = release_linux_sdls_include_path;
-                    sdls_lib_path = release_linux_sdls_lib_path;
-                },
-                .windows => {
-                    sdls_include_path = release_win_sdls_include_path;
-                    sdls_lib_path = b.pathJoin(&.{ release_win_sdls_lib_path, @tagName(target.result.cpu.arch) });
-                },
-                else => {},
-            }
-
             target_path = b.pathJoin(&.{ name_target_triple, target_path });
         }
 
-        const anim_popup = b.dependency("anim_popup", .{
-            .optimize = optimize,
-            // for some reason, specifying target leads to a fatal error: 'SDL3/SDL.h' not found
-            //.target = target,
-            .sdls_include_path = sdls_include_path orelse "",
-        });
-
-        const translate_c = b.dependency("translate_c", .{});
-
-        const translator: Translator = .init(translate_c, .{
-            .c_source_file = b.path("src/c.h"),
-            .target = target,
-            .optimize = optimize,
-        });
-
-        const mod = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .imports = &.{
-                .{
-                    .name = "anim_popup",
-                    .module = anim_popup.module("anim_popup"),
-                },
-                .{
-                    .name = "c",
-                    .module = translator.mod,
-                },
-            },
-        });
-
         const assets_dir = b.pathJoin(&.{ target_path, switch (target.result.os.tag) {
-            .linux => b.pathJoin(&.{ "share", exe_name }),
+            .linux => b.pathJoin(&.{ "share", common_mame }),
             else => "assets",
         } });
 
-        const install_prefix: std.Build.LazyPath = .{ .relative = .{ .base = .install_prefix } };
-        const assets_sub_path = assets_dir;
+        // right now, translate-c fails to receive include paths from the target module, failing to find the headers, so I translate-c'd them manually
+        //
+        // const translate_c = b.dependency("translate_c", .{});
+        //
+        // const Translator = @import("translate_c").Translator;
+        // const translator: Translator = .init(translate_c, .{
+        //     .c_source_file = b.path("src/c.h"),
+        //     .target = target,
+        //     .optimize = optimize,
+        // });
 
-        const sh_tool = b.addSystemCommand(&.{"sh"});
-        sh_tool.addFileArg(b.path("stupid_install_prefix.sh"));
-        sh_tool.addDirectoryArg2(install_prefix, .{});
-        sh_tool.addArg(assets_sub_path);
-        const build_opts_file = sh_tool.addOutputFileArg2("build_options.zig", .{});
-
-        b.getInstallStep().dependOn(&sh_tool.step);
-
-        mod.addAnonymousImport("build_options", .{
-            .root_source_file = build_opts_file,
-            .target = b.graph.host,
-        });
-
-        if (sdls_include_path) |inc_path| {
-            mod.addIncludePath(.{ .cwd_relative = inc_path });
-        }
-
-        const exe_mod = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+        const c_mod = b.createModule(.{
+            .root_source_file = b.path(try std.mem.join(b.allocator, "", &.{ "src/c-x86_64-", @tagName(target.result.os.tag), ".zig" })),
+            // .root_source_file = b.path("src/c-x86_64-linux.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "derg_clock_popup", .module = mod },
-                .{ .name = "anim_popup", .module = anim_popup.module("anim_popup") },
-            },
         });
 
-        if (sdls_lib_path) |lib_path| {
-            exe_mod.addLibraryPath(.{ .cwd_relative = lib_path });
-            exe_mod.addRPath(.{ .cwd_relative = lib_path });
+        var install_exes_buf: [exes.len]*std.Build.Step.InstallArtifact = undefined;
+        const install_exes = install_exes_buf[0..variants.len];
+        for (variants, 0..) |variant, i| {
+            const exe_mod = b.createModule(.{
+                .root_source_file = b.path(variant.sub_path),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{
+                        .name = "c",
+                        //.module = translator.mod,
+                        .module = c_mod,
+                    },
+                },
+            });
+
+            const exe_relative_assets_dir = switch (target.result.os.tag) {
+                .linux => b.pathJoin(&.{ "..", assets_dir }),
+                else => "assets",
+            };
+
+            const build_options = b.addOptions();
+            build_options.addOption([]const u8, "assets_path", exe_relative_assets_dir);
+            exe_mod.addOptions("build_options", build_options);
+
+            if (sdls_include_path) |inc_path| {
+                exe_mod.addIncludePath(.{ .cwd_relative = inc_path });
+            }
+
+            if (sdls_lib_path) |lib_path| {
+                exe_mod.addLibraryPath(.{ .cwd_relative = lib_path });
+                exe_mod.addRPath(.{ .cwd_relative = lib_path });
+            }
+
+            exe_mod.linkSystemLibrary("SDL3", .{});
+            exe_mod.linkSystemLibrary("SDL3_ttf", .{});
+            exe_mod.linkSystemLibrary("SDL3_image", .{});
+
+            const exe = b.addExecutable(.{
+                .name = variant.name,
+                .root_module = exe_mod,
+            });
+
+            if (target.result.os.tag == .windows) {
+                // to get rid of the ugly terminal window when opening the exe on Windows
+                exe.subsystem = .windows;
+            }
+
+            const target_bin_dir = if (target.result.os.tag == .windows) target_path else b.pathJoin(&.{ target_path, "bin" });
+
+            const install_exe = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = target_bin_dir } } });
+            b.getInstallStep().dependOn(&install_exe.step);
+            install_exes[i] = install_exe;
+
+            // const exe_check = b.addExecutable(.{
+            //     .name = "exe_check",
+            //     .root_module = exe_mod,
+            // });
+            //
+            // const check = b.step("check", "Check if the code compiles");
+            // check.dependOn(&exe_check.step);
+
+            // expose run step if only one variant was speficied to avoid clutter
+            if (variants.len == 1) {
+                const run_step = b.step("run", "Run the app");
+
+                const run_cmd = b.addRunArtifact(exe);
+                run_step.dependOn(&run_cmd.step);
+
+                run_cmd.step.dependOn(b.getInstallStep());
+
+                run_cmd.addPassthruArgs();
+            }
+
+            const exe_tests = b.addTest(.{
+                .root_module = exe.root_module,
+            });
+
+            const run_exe_tests = b.addRunArtifact(exe_tests);
+
+            test_step.dependOn(&run_exe_tests.step);
         }
-
-        exe_mod.linkSystemLibrary("SDL3", .{});
-        exe_mod.linkSystemLibrary("SDL3_ttf", .{});
-        exe_mod.linkSystemLibrary("SDL3_image", .{});
-
-        const exe = b.addExecutable(.{
-            .name = exe_name,
-            .root_module = exe_mod,
-        });
 
         if (target.result.os.tag == .windows) {
             const sdl_dll = b.addInstallFile(b.path("win_deps/x86_64/SDL3.dll"), b.pathJoin(&.{ target_path, "SDL3.dll" }));
@@ -152,18 +195,12 @@ pub fn build(b: *std.Build) !void {
             b.getInstallStep().dependOn(&sdl_ttf_dll.step);
             const sdl_image_dll = b.addInstallFile(b.path("win_deps/x86_64/SDL3_image.dll"), b.pathJoin(&.{ target_path, "SDL3_image.dll" }));
             b.getInstallStep().dependOn(&sdl_image_dll.step);
-
-            // to get rid of the ugly terminal window when opening the exe on Windows
-            exe.subsystem = .windows;
         }
 
         const assets_install_dir = b.addInstallDirectory(.{ .source_dir = b.path("assets/install"), .install_subdir = ".", .install_dir = .{ .custom = assets_dir } });
         b.getInstallStep().dependOn(&assets_install_dir.step);
 
-        const target_bin_dir = if (target.result.os.tag == .windows) target_path else b.pathJoin(&.{ target_path, "bin" });
-
-        const install_exe = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = target_bin_dir } } });
-        b.getInstallStep().dependOn(&install_exe.step);
+        const install_prefix: std.Build.LazyPath = .{ .relative = .{ .base = .install_prefix } };
 
         if (release and target.result.os.tag == .windows) {
             const zip_tool = b.addSystemCommand(&.{"zip"});
@@ -176,43 +213,10 @@ pub fn build(b: *std.Build) !void {
             const zip_file = b.addInstallFile(zip_stdout, zip_path);
             b.getInstallStep().dependOn(&zip_file.step);
 
-            zip_tool.step.dependOn(&install_exe.step);
+            for (install_exes) |ie| {
+                zip_tool.step.dependOn(&ie.step);
+            }
             b.getInstallStep().dependOn(&zip_tool.step);
-        }
-
-        if (!release) {
-            const exe_check = b.addExecutable(.{
-                .name = "exe_check",
-                .root_module = exe_mod,
-            });
-
-            const check = b.step("check", "Check if the code compiles");
-            check.dependOn(&exe_check.step);
-
-            const run_step = b.step("run", "Run the app");
-
-            const run_cmd = b.addRunArtifact(exe);
-            run_step.dependOn(&run_cmd.step);
-
-            run_cmd.step.dependOn(b.getInstallStep());
-
-            run_cmd.addPassthruArgs();
-
-            const mod_tests = b.addTest(.{
-                .root_module = mod,
-            });
-
-            const run_mod_tests = b.addRunArtifact(mod_tests);
-
-            const exe_tests = b.addTest(.{
-                .root_module = exe.root_module,
-            });
-
-            const run_exe_tests = b.addRunArtifact(exe_tests);
-
-            const test_step = b.step("test", "Run tests");
-            test_step.dependOn(&run_mod_tests.step);
-            test_step.dependOn(&run_exe_tests.step);
         }
     }
 }
