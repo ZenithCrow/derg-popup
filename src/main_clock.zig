@@ -1,18 +1,16 @@
 const std = @import("std");
 const time = std.time;
+const build_options = @import("build_options");
 
-const anim_popup = @import("anim_popup");
-const anim = anim_popup.anim;
-const raster = anim_popup.raster;
-const c = anim_popup.c;
-const derg_clock_popup = @import("derg_clock_popup");
-const build_options = derg_clock_popup.build_options;
-const derg_c = derg_clock_popup.c;
+const c = @import("c");
+
+const anim = @import("anim/anim.zig");
+const raster = @import("anim/raster.zig");
 
 const time_buf_size = 8;
 
 const title = "derg clock popup";
-const font_path = build_options.assets_path ++ "/fonts/PressStart-Regular.ttf";
+const font_path = build_options.assets_path ++ "/fonts/PressStart2P-Regular-extended.ttf";
 const derg_frame_path = build_options.assets_path ++ "/derg-frames/";
 
 const font_size: f32 = 120;
@@ -64,7 +62,17 @@ const anim_pause_ms: u64 = 2000;
 var rndr: ?*c.SDL_Renderer = null;
 var win: ?*c.SDL_Window = null;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
+    var exe_dir_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_dir_path_len = try std.process.executableDirPath(io, &exe_dir_path_buf);
+    const exe_dir_path = exe_dir_path_buf[0..exe_dir_path_len];
+    std.process.setCurrentPath(io, exe_dir_path) catch |err| {
+        std.log.err("failed to set current path to '{s}': {t}", .{ exe_dir_path, err });
+        return error.SetCurrentPathFailed;
+    };
+
     if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
         std.log.err("failed to initialize SDL: {s}", .{c.SDL_GetError()});
         return error.SDLInitFailed;
@@ -77,11 +85,11 @@ pub fn main() !void {
     }
     defer c.TTF_Quit();
 
-    const cur_time = derg_c.time(null);
-    const tm = derg_c.localtime(&cur_time);
+    const cur_time = c.time(null);
+    const tm = c.localtime(&cur_time);
     var time_buf: [time_buf_size]u8 = undefined;
 
-    const w_len = derg_c.strftime(&time_buf[0], time_buf_size, "%H:%M", tm);
+    const w_len = c.strftime(&time_buf[0], time_buf_size, "%H:%M", tm);
     const time_str = time_buf[0..w_len];
 
     const font = c.TTF_OpenFont(font_path, font_size);
